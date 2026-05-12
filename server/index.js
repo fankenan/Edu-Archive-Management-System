@@ -7,6 +7,8 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 
 const { initDB } = require('./db');
+const cron = require('node-cron');
+const { cleanupTempFiles } = require('./utils/convertToPdf');
 
 // Route modules
 const authRoutes = require('./routes/auth');
@@ -59,6 +61,21 @@ app.use('/api/uploaded-files', apiLimiter, uploadedFileRoutes);
 
 const convertRoutes = require('./routes/convert');
 app.use('/api/convert', apiLimiter, convertRoutes);
+
+// ============ Temp File Cleanup ============
+// Run at 3 AM daily - clean converted PDFs older than 24 hours
+cron.schedule('0 3 * * *', () => {
+  console.log('[Cleanup] Starting daily temp file cleanup...');
+  const deleted = cleanupTempFiles(UPLOADS_DIR, 24 * 60 * 60 * 1000);
+  console.log(`[Cleanup] Deleted ${deleted} temp file(s)`);
+}, { timezone: 'Asia/Shanghai' });
+
+// Also run cleanup on startup (once)
+setTimeout(() => {
+  console.log('[Cleanup] Running startup cleanup...');
+  const deleted = cleanupTempFiles(UPLOADS_DIR, 24 * 60 * 60 * 1000);
+  console.log(`[Cleanup] Deleted ${deleted} temp file(s)`);
+}, 5000);
 
 // ============ Health Check ============
 app.get('/api/health', (req, res) => {

@@ -116,6 +116,14 @@ function buildFormData(data) {
   return fd;
 }
 
+// Preview - server-side PDF conversion for iframe display
+export const getPreviewUrl = (filename, action = 'preview') =>
+  api.post('/convert/preview', { filename, action }, { timeout: 120000 });
+
+// Preview - server-side image conversion for weak devices / old browsers
+export const getPreviewImages = (filename) =>
+  api.post('/convert/preview/images', { filename }, { timeout: 120000 });
+
 export function withToken(url) {
   if (!url) return url;
   const token = localStorage.getItem('token');

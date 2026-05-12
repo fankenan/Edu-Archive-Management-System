@@ -1,9 +1,67 @@
 import { useState, useEffect, useRef } from 'react';
 import dayjs from 'dayjs';
-import { withToken } from '../api';
+import { withToken, getPreviewUrl } from '../api';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
+import ImagePreview from './ImagePreview';
 
+// ============ Browser Capability Detection ============
+function detectBrowserCapability() {
+  const ua = navigator.userAgent;
+
+  // IE 11
+  if (ua.includes('Trident') || ua.includes('MSIE')) {
+    return { isModern: false, isWeakDevice: true, reason: 'ie11' };
+  }
+
+  // Old Edge (EdgeHTML-based, not Chromium)
+  if (ua.includes('Edge/') && !ua.includes('Edg/')) {
+    const version = parseInt(ua.match(/Edge\/(\d+)/)?.[1] || '0');
+    if (version < 79) return { isModern: false, isWeakDevice: true, reason: 'old-edge' };
+  }
+
+  // Old Chrome
+  if (ua.includes('Chrome/') && !ua.includes('Chromium')) {
+    const match = ua.match(/Chrome\/(\d+)/);
+    const version = match ? parseInt(match[1]) : 0;
+    if (version < 80) return { isModern: false, isWeakDevice: true, reason: 'old-chrome' };
+  }
+
+  // Old Firefox
+  if (ua.includes('Firefox/')) {
+    const match = ua.match(/Firefox\/(\d+)/);
+    const version = match ? parseInt(match[1]) : 0;
+    if (version < 75) return { isModern: false, isWeakDevice: true, reason: 'old-firefox' };
+  }
+
+  // Windows 7 detection
+  const isWin7 = ua.includes('Windows NT 6.1');
+
+  // Kylin (银河麒麟) detection
+  const isKylin = ua.includes('Kylin') || ua.includes('麒麟');
+
+  // Check for low-memory / weak device indicators
+  // navigator.hardwareConcurrency < 2, deviceMemory not available in all browsers
+  if (isWin7 || isKylin) {
+    return { isModern: false, isWeakDevice: true, reason: isKylin ? 'kylin' : 'windows7' };
+  }
+
+  return { isModern: true, isWeakDevice: false, reason: 'modern' };
+}
+
+function isNativePdfFile(filename) {
+  return /\.pdf$/i.test(filename);
+}
+
+function shouldUseServerFallback(filename, cap) {
+  // Use server fallback if: not a native PDF (Office docs need conversion)
+  // OR browser is weak (PDF.js canvas rendering would be slow)
+  if (!isNativePdfFile(filename)) return true;
+  if (cap.isWeakDevice) return true;
+  return false;
+}
+
+// ============ PDF Page Renderer (Canvas-based for modern browsers) ============
 function PdfPageRenderer({ path: filePath, name }) {
   const [pages, setPages] = useState([]);
   const [htmlContent, setHtmlContent] = useState(null);
@@ -18,10 +76,7 @@ function PdfPageRenderer({ path: filePath, name }) {
         const data = await resp.json();
 
         if (data.type === 'html') {
-          if (!cancelled) {
-            setHtmlContent(data.html);
-            setLoading(false);
-          }
+          if (!cancelled) { setHtmlContent(data.html); setLoading(false); }
           return;
         }
 
@@ -121,9 +176,171 @@ function chunkArray(arr, size) {
   return chunks;
 }
 
+// ============ Iframe-based Renderer for Weak Devices ============
+function FallbackAttachmentRenderer({ attachments }) {
+  const [previewFile, setPreviewFile] = useState(null);
+
+  if (!attachments?.length) return null;
+
+  return (
+    <>
+      {attachments.map((a, i) => {
+        const ext = (a.name || '').split('.').pop()?.toLowerCase();
+        if (isImageFile(a.name)) return null;
+
+        return (
+          <div key={`fallback-${i}`} className="pdf-page">
+            <div className="pdf-section">
+              <div style={{ padding: 40, textAlign: 'center' }}>
+                <div style={{ marginBottom: 16, fontSize: 16 }}>{a.name}</div>
+                <button
+                  className="btn-sm btn-primary"
+                  onClick={() => setPreviewFile(a)}
+                >
+                  预览 / 打印 / 另存
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      {previewFile && (
+        <ImagePreview
+          filename={previewFile.path}
+          title={previewFile.name}
+          onClose={() => setPreviewFile(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// ============ Main Component ============
 export default function PdfPreview({ title, type, data, onClose }) {
   const [saving, setSaving] = useState(false);
+  const [usingFallback, setUsingFallback] = useState(false);
+  const [cap] = useState(() => detectBrowserCapability());
   const bodyRef = useRef(null);
+
+  // Determine whether to use iframe fallback based on attachments
+  useEffect(() => {
+    if (!data.attachments?.length) return;
+
+    // If any attachment is not a native PDF on a weak device, use fallback mode
+    const hasNonPdf = data.attachments.some(a => {
+      const ext = (a.name || '').split('.').pop()?.toLowerCase();
+      return !isImageFile(a.name) && ext !== 'pdf';
+    });
+
+    if (hasNonPdf && cap.isWeakDevice) {
+      setUsingFallback(true);
+    }
+  }, [data.attachments, cap]);
+
+  const handleSave = async () => {
+    // Use server-side conversion for export (more reliable for complex docs)
+    const firstAttachment = data.attachments?.[0];
+    if (firstAttachment && !isImageFile(firstAttachment.name)) {
+      setSaving(true);
+      try {
+        const resp = await getPreviewUrl(firstAttachment.path, 'export');
+        if (resp.data.success) {
+          const a = document.createElement('a');
+          a.href = withToken(resp.data.pdfUrl);
+          a.download = firstAttachment.name.replace(/\.[^.]+$/, '.pdf');
+          a.target = '_blank';
+          a.click();
+        }
+      } catch (e) {
+        console.error('Export failed:', e);
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
+    // Fallback to client-side for images
+    const pages = bodyRef.current?.querySelectorAll('.pdf-page');
+    if (!pages || pages.length === 0) return;
+
+    setSaving(true);
+    try {
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 10;
+      const imgWidth = pageWidth - margin * 2;
+      const maxImgHeight = pageHeight - margin * 2;
+      let firstPage = true;
+
+      for (let pi = 0; pi < pages.length; pi++) {
+        const page = pages[pi];
+        const photoItems = page.querySelectorAll('.pdf-photo-item');
+
+        if (photoItems.length > 0) {
+          const canvas = await html2canvas(page, {
+            scale: 2,
+            useCORS: true,
+            allowTaint: true,
+            logging: false,
+          });
+          const imgH = (canvas.height * imgWidth) / canvas.width;
+          const finalH = Math.min(imgH, maxImgHeight);
+          const scale = finalH / imgH;
+
+          if (!firstPage) pdf.addPage();
+          firstPage = false;
+
+          if (scale < 1) {
+            const scaledW = imgWidth * scale;
+            const scaledH = imgH * scale;
+            pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, margin, scaledW, scaledH);
+          } else {
+            pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, margin, imgWidth, imgH);
+          }
+        } else {
+          const canvas = await html2canvas(page, {
+            scale: 2,
+            useCORS: true,
+            allowTaint: true,
+            logging: false,
+          });
+
+          const imgHeight = (canvas.height * imgWidth) / canvas.width;
+          const remainingHeight = pageHeight - margin * 2;
+          let srcY = 0;
+
+          while (srcY < canvas.height) {
+            if (!firstPage) pdf.addPage();
+            firstPage = false;
+
+            const sliceHeight = Math.min(
+              (canvas.height - srcY),
+              (remainingHeight / imgHeight) * canvas.height
+            );
+            const sliceCanvas = document.createElement('canvas');
+            sliceCanvas.width = canvas.width;
+            sliceCanvas.height = Math.ceil(sliceHeight);
+            const ctx = sliceCanvas.getContext('2d');
+            ctx.drawImage(canvas, 0, srcY, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight);
+
+            const sliceData = sliceCanvas.toDataURL('image/jpeg', 0.92);
+            const sliceImgH = (sliceHeight * imgWidth) / canvas.width;
+
+            pdf.addImage(sliceData, 'JPEG', margin, margin, imgWidth, sliceImgH);
+
+            srcY += sliceHeight;
+          }
+        }
+      }
+
+      pdf.save(`${title || '档案导出'}_${dayjs().format('YYYY-MM-DD')}.pdf`);
+    } catch (e) {
+      console.error('PDF generation error:', e);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const renderDocAttachmentPages = () => {
     if (!data.attachments?.length) return null;
@@ -265,106 +482,31 @@ export default function PdfPreview({ title, type, data, onClose }) {
     </>
   );
 
-  const handleSave = async () => {
-    const pages = bodyRef.current?.querySelectorAll('.pdf-page');
-    if (!pages || pages.length === 0) return;
-
-    setSaving(true);
-    try {
-      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = pdf.internal.pageSize.getHeight();
-      const margin = 10;
-      const imgWidth = pageWidth - margin * 2;
-      const maxImgHeight = pageHeight - margin * 2;
-      let firstPage = true;
-
-      for (let pi = 0; pi < pages.length; pi++) {
-        const page = pages[pi];
-        const photoItems = page.querySelectorAll('.pdf-photo-item');
-
-        if (photoItems.length > 0) {
-          // Photo page: ≤2 photos per page; render whole page, scale if too tall
-          const canvas = await html2canvas(page, {
-            scale: 2,
-            useCORS: true,
-            allowTaint: true,
-            logging: false,
-          });
-          const imgH = (canvas.height * imgWidth) / canvas.width;
-          const finalH = Math.min(imgH, maxImgHeight);
-          const scale = finalH / imgH;
-
-          if (!firstPage) pdf.addPage();
-          firstPage = false;
-
-          if (scale < 1) {
-            // Scale down to fit one A4 page
-            const scaledW = imgWidth * scale;
-            const scaledH = imgH * scale;
-            pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, margin, scaledW, scaledH);
-          } else {
-            pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', margin, margin, imgWidth, imgH);
-          }
-        } else {
-          // Regular content page — slice if taller than A4
-          const canvas = await html2canvas(page, {
-            scale: 2,
-            useCORS: true,
-            allowTaint: true,
-            logging: false,
-          });
-
-          const imgHeight = (canvas.height * imgWidth) / canvas.width;
-          const remainingHeight = pageHeight - margin * 2;
-          let srcY = 0;
-
-          while (srcY < canvas.height) {
-            if (!firstPage) pdf.addPage();
-            firstPage = false;
-
-            const sliceHeight = Math.min(
-              (canvas.height - srcY),
-              (remainingHeight / imgHeight) * canvas.height
-            );
-            const sliceCanvas = document.createElement('canvas');
-            sliceCanvas.width = canvas.width;
-            sliceCanvas.height = Math.ceil(sliceHeight);
-            const ctx = sliceCanvas.getContext('2d');
-            ctx.drawImage(canvas, 0, srcY, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight);
-
-            const sliceData = sliceCanvas.toDataURL('image/jpeg', 0.92);
-            const sliceImgH = (sliceHeight * imgWidth) / canvas.width;
-
-            pdf.addImage(sliceData, 'JPEG', margin, margin, imgWidth, sliceImgH);
-
-            srcY += sliceHeight;
-          }
-        }
-      }
-
-      pdf.save(`${title || '档案导出'}_${dayjs().format('YYYY-MM-DD')}.pdf`);
-    } catch (e) {
-      console.error('PDF generation error:', e);
-    } finally {
-      setSaving(false);
-    }
-  };
-
   return (
     <div className="pdf-preview-overlay" onClick={onClose}>
       <div className="pdf-preview-modal" onClick={e => e.stopPropagation()}>
         <div className="pdf-preview-header">
           <h3>{title || 'PDF 预览'}</h3>
           <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-            <button className="btn-sm btn-primary" style={{ width: 'auto', marginTop: 0 }} onClick={handleSave} disabled={saving}>{saving ? '正在生成PDF...' : '保存'}</button>
+            <button className="btn-sm btn-primary" style={{ width: 'auto', marginTop: 0 }} onClick={handleSave} disabled={saving}>
+              {saving ? '正在生成PDF...' : '保存'}
+            </button>
             <button className="btn-sm btn-secondary" onClick={() => window.print()}>打印</button>
             <button className="btn-sm btn-outline" onClick={onClose}>关闭</button>
           </div>
         </div>
         <div className="pdf-preview-body" ref={bodyRef}>
-          {type === 'doc' ? renderDocPdf() : renderWorkPdf()}
-          {type === 'doc' ? renderDocAttachmentPages() : renderWorkAttachmentPages()}
+          {usingFallback ? (
+            <>
+              {type === 'doc' ? renderDocPdf() : renderWorkPdf()}
+              <FallbackAttachmentRenderer attachments={data.attachments} />
+            </>
+          ) : (
+            <>
+              {type === 'doc' ? renderDocPdf() : renderWorkPdf()}
+              {type === 'doc' ? renderDocAttachmentPages() : renderWorkAttachmentPages()}
+            </>
+          )}
         </div>
       </div>
     </div>

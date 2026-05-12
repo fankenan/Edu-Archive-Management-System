@@ -41,6 +41,70 @@ function libreOfficeConvert(filePath, outDir) {
   }
 }
 
+function getGhostscriptPath() {
+  if (process.env.GHOSTSCRIPT_PATH) return process.env.GHOSTSCRIPT_PATH;
+
+  if (process.platform === 'win32') {
+    const winPaths = [
+      'C:\\Program Files\\gs\\gs10.03.1\\bin\\gswin64c.exe',
+      'C:\\Program Files\\gs\\gs10.03.0\\bin\\gswin64c.exe',
+      'C:\\Program Files\\gs\\gs9.56.1\\bin\\gswin64c.exe',
+      'C:\\Program Files (x86)\\gs\\gs10.03.1\\bin\\gswin32c.exe',
+      'C:\\Program Files (x86)\\gs\\gs10.03.0\\bin\\gswin32c.exe',
+      'C:\\Program Files (x86)\\gs\\gs9.56.1\\bin\\gswin32c.exe',
+    ];
+    for (const p of winPaths) {
+      if (fs.existsSync(p)) return p;
+    }
+  }
+
+  return 'gs';
+}
+
+const gsBin = getGhostscriptPath();
+
+/**
+ * Optimize PDF with Ghostscript: compress, reduce size, standardize layout.
+ * Returns true if successful, false otherwise.
+ */
+function optimizePdfWithGhostscript(pdfPath) {
+  if (!fs.existsSync(pdfPath)) return false;
+
+  const optimizedPath = pdfPath.replace(/\.pdf$/i, '.optimized.pdf');
+
+  try {
+    const cmd = `"${gsBin}" -dNOPAUSE -dBATCH -sDEVICE=pdfwrite \
+      -dCompatibilityLevel=1.4 \
+      -dPDFSETTINGS=/ebook \
+      -dColorImageResolution=150 \
+      -dGrayImageResolution=150 \
+      -dMonoImageResolution=150 \
+      -dDownsampleColorImages=true \
+      -dDownsampleGrayImages=true \
+      -dEmbedAllFonts=true \
+      -dSubsetFonts=true \
+      -dAutoRotatePages=/PageByPage \
+      -sOutputFile="${optimizedPath}" \
+      "${pdfPath}"`;
+
+    execSync(cmd, { timeout: 60000, stdio: 'pipe' });
+
+    if (fs.existsSync(optimizedPath)) {
+      const origSize = fs.statSync(pdfPath).size;
+      const optSize = fs.statSync(optimizedPath).size;
+      console.log(`[Ghostscript] Optimized: ${origSize} -> ${optSize} bytes (${Math.round(optSize / origSize * 100)}%)`);
+      fs.unlinkSync(pdfPath);
+      fs.renameSync(optimizedPath, pdfPath);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.error('Ghostscript optimization failed:', e.stderr?.toString() || e.message);
+    try { if (fs.existsSync(optimizedPath)) fs.unlinkSync(optimizedPath); } catch (_) {}
+    return false;
+  }
+}
+
 /**
  * Convert a Word/Excel file to PDF at upload time.
  * Deletes the original file and renames the PDF to a unique name.
@@ -71,6 +135,9 @@ function convertToPdfOnUpload(filePath, originalName) {
     fs.renameSync(loPdfPath, uniquePdfPath);
   }
 
+  // Optimize with Ghostscript
+  optimizePdfWithGhostscript(uniquePdfPath);
+
   // Delete the original non-PDF file
   try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
 
@@ -85,4 +152,206 @@ function convertToPdfOnUpload(filePath, originalName) {
   };
 }
 
-module.exports = { convertToPdfOnUpload, libreOfficeConvert, getLibreOfficePath };
+/**
+ * Convert any file to optimized PDF via LibreOffice + Ghostscript.
+ * Returns { success, pdfPath, pdfUrl, error }.
+ */
+function convertToPdf(sourcePath, originalName) {
+  const ext = path.extname(originalName).toLowerCase();
+  if (!['.pdf', '.doc', '.docx', '.xls', '.xlsx'].includes(ext)) {
+    return { success: false, error: 'Unsupported format for PDF conversion' };
+  }
+
+  if (ext === '.pdf') {
+    // Optimize existing PDF
+    if (optimizePdfWithGhostscript(sourcePath)) {
+      return { success: true, pdfPath: sourcePath, pdfUrl: `/uploads/${path.basename(sourcePath)}` };
+    }
+    return { success: false, error: 'PDF optimization failed' };
+  }
+
+  const outDir = path.dirname(sourcePath);
+  if (!libreOfficeConvert(sourcePath, outDir)) {
+    return { success: false, error: 'LibreOffice conversion failed' };
+  }
+
+  const loPdfName = path.basename(originalName, ext) + '.pdf';
+  const loPdfPath = path.join(outDir, loPdfName);
+
+  if (!fs.existsSync(loPdfPath)) {
+    return { success: false, error: 'LibreOffice did not produce output file' };
+  }
+
+  const convertedName = path.basename(sourcePath).replace(/\.[^.]+$/, '') + '.converted.pdf';
+  const convertedPath = path.join(outDir, convertedName);
+
+  if (loPdfPath !== convertedPath) {
+    if (fs.existsSync(convertedPath)) fs.unlinkSync(convertedPath);
+    fs.renameSync(loPdfPath, convertedPath);
+  }
+
+  if (!fs.existsSync(convertedPath)) {
+    return { success: false, error: 'Failed to rename converted file' };
+  }
+
+  // Optimize with Ghostscript
+  optimizePdfWithGhostscript(convertedPath);
+
+  return {
+    success: true,
+    pdfPath: convertedPath,
+    pdfUrl: `/uploads/${path.basename(convertedPath)}`
+  };
+}
+
+/**
+ * Clean up temporary converted PDF files older than maxAgeMs.
+ * Returns the number of files deleted.
+ */
+function cleanupTempFiles(uploadsDir, maxAgeMs = 24 * 60 * 60 * 1000) {
+  if (!fs.existsSync(uploadsDir)) return 0;
+
+  const now = Date.now();
+  let deleted = 0;
+  const patterns = ['.converted.pdf', '.converted.png', '.optimized.pdf'];
+
+  try {
+    const files = fs.readdirSync(uploadsDir);
+    for (const file of files) {
+      const isTemp = patterns.some(p => file.endsWith(p));
+      if (!isTemp) continue;
+
+      const filePath = path.join(uploadsDir, file);
+      try {
+        const stat = fs.statSync(filePath);
+        if (now - stat.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(filePath);
+          deleted++;
+          console.log(`[Cleanup] Deleted old temp file: ${file}`);
+        }
+      } catch (e) {
+        // Skip inaccessible files
+      }
+    }
+  } catch (e) {
+    console.error('[Cleanup] Failed to read uploads directory:', e.message);
+  }
+
+  return deleted;
+}
+
+/**
+ * Convert document to image(s) using LibreOffice.
+ * Returns array of image info: { page: 1, path: "xxx_1.png", url: "/uploads/xxx_1.png" }
+ */
+function convertToImages(sourcePath, originalName) {
+  const ext = path.extname(originalName).toLowerCase();
+  if (!['.pdf', '.doc', '.docx', '.xls', '.xlsx'].includes(ext)) {
+    return { success: false, error: 'Unsupported format for image conversion' };
+  }
+
+  const outDir = path.dirname(sourcePath);
+  const baseName = path.basename(sourcePath).replace(/\.[^.]+$/, '');
+  const dpi = parseInt(process.env.LIBREOFFICE_DPI || '150');
+
+  // Step 1: If not already PDF, convert to PDF first
+  let pdfPath = sourcePath;
+  if (ext !== '.pdf') {
+    if (!libreOfficeConvert(sourcePath, outDir)) {
+      return { success: false, error: 'LibreOffice conversion failed' };
+    }
+    const loPdfName = path.basename(originalName, ext) + '.pdf';
+    const loPdfPath = path.join(outDir, loPdfName);
+    if (!fs.existsSync(loPdfPath)) {
+      return { success: false, error: 'LibreOffice did not produce PDF' };
+    }
+    // Rename to unique name with .converted.pdf suffix
+    const convertedPdfName = baseName + '.converted.pdf';
+    pdfPath = path.join(outDir, convertedPdfName);
+    if (loPdfPath !== pdfPath) {
+      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+      fs.renameSync(loPdfPath, pdfPath);
+    }
+  } else {
+    // For existing PDF, create a copy with .converted.pdf name for page extraction
+    const convertedPdfName = baseName + '.converted.pdf';
+    pdfPath = path.join(outDir, convertedPdfName);
+    if (pdfPath !== sourcePath) {
+      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+      fs.copyFileSync(sourcePath, pdfPath);
+    }
+  }
+
+  // Step 2: Convert PDF to images using Ghostscript
+  // Ghostscript can rasterize PDF pages to PNG
+  const gsDpi = dpi;
+  const images = [];
+
+  try {
+    // First get page count using a quick query
+    const pageCountCmd = `"${gsBin}" -dNOPAUSE -dBATCH -sDEVICE=nullpage "${pdfPath}" 2>&1 | grep -c "Page" || echo "1"`;
+    // Simpler: just try to convert and find how many files were created
+
+    // Convert each page to PNG using Ghostscript
+    // Use pdftoppm (from poppler) if available, otherwise use Ghostscript
+    const tempPrefix = path.join(outDir, `${baseName}.converted`);
+
+    // Try using pdftoppm first (faster, better quality)
+    try {
+      execSync(`pdftoppm -r ${gsDpi} -png "${pdfPath}" "${tempPrefix}"`, {
+        timeout: 60000,
+        stdio: 'pipe',
+      });
+    } catch (e) {
+      // Fallback: use Ghostscript to convert PDF to images
+      try {
+        execSync(`"${gsBin}" -dNOPAUSE -dBATCH -sDEVICE=png16m -r${gsDpi} -sOutputFile="${tempPrefix}_%d.png" "${pdfPath}"`, {
+          timeout: 60000,
+          stdio: 'pipe',
+        });
+      } catch (gsErr) {
+        console.error('Image conversion failed:', gsErr.message);
+        // Cleanup and return error
+        try { fs.unlinkSync(pdfPath); } catch (_) {}
+        return { success: false, error: 'Image conversion failed' };
+      }
+    }
+
+    // Find generated images
+    const files = fs.readdirSync(outDir)
+      .filter(f => f.startsWith(baseName + '.converted') && f.endsWith('.png'))
+      .sort();
+
+    if (files.length === 0) {
+      try { fs.unlinkSync(pdfPath); } catch (_) {}
+      return { success: false, error: 'No images generated' };
+    }
+
+    // Rename to proper naming convention
+    for (let i = 0; i < files.length; i++) {
+      const oldPath = path.join(outDir, files[i]);
+      const newName = `${baseName}.page_${i + 1}.png`;
+      const newPath = path.join(outDir, newName);
+      if (oldPath !== newPath) {
+        if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
+        fs.renameSync(oldPath, newPath);
+      }
+      images.push({
+        page: i + 1,
+        path: newName,
+        url: `/uploads/${newName}`,
+      });
+    }
+
+    // Cleanup the intermediate PDF
+    try { fs.unlinkSync(pdfPath); } catch (_) {}
+
+    return { success: true, images, totalPages: images.length };
+  } catch (e) {
+    console.error('convertToImages error:', e.message);
+    try { if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath); } catch (_) {}
+    return { success: false, error: e.message };
+  }
+}
+
+module.exports = { convertToPdfOnUpload, libreOfficeConvert, getLibreOfficePath, getGhostscriptPath, optimizePdfWithGhostscript, convertToPdf, convertToImages, cleanupTempFiles };

@@ -4,7 +4,7 @@ const fs = require('fs');
 const mammoth = require('mammoth');
 const XLSX = require('xlsx');
 const { authMiddleware } = require('../middleware/auth');
-const { libreOfficeConvert } = require('../utils/convertToPdf');
+const { libreOfficeConvert, convertToPdf, convertToImages } = require('../utils/convertToPdf');
 
 const router = express.Router();
 
@@ -159,5 +159,86 @@ async function convertXlsxToHtml(filePath, res) {
     return res.status(500).json({ error: '电子表格转换失败，请尝试安装 LibreOffice 以获取更好体验' });
   }
 }
+
+/**
+ * POST /api/preview
+ * Unified endpoint for iframe-based PDF preview and export.
+ * Converts Office documents to optimized PDF and returns the URL.
+ * Body: { filename: "xxx.docx", action: "preview" | "export" }
+ */
+router.post('/preview', authMiddleware, async (req, res) => {
+  try {
+    const { filename, action } = req.body;
+    if (!filename) return res.status(400).json({ error: 'filename is required' });
+
+    // Security: prevent path traversal
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+
+    const uploadsDir = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
+    const filePath = path.join(uploadsDir, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const result = convertToPdf(filePath, filename);
+
+    if (!result.success) {
+      return res.status(500).json({ error: result.error || 'Conversion failed' });
+    }
+
+    const expiresAt = new Date(Date.now() + (action === 'export' ? 60 * 60 * 1000 : 30 * 60 * 1000));
+
+    return res.json({
+      success: true,
+      pdfUrl: result.pdfUrl,
+      expiresAt: expiresAt.toISOString(),
+    });
+  } catch (err) {
+    console.error('Preview error:', err);
+    res.status(500).json({ error: '预览服务错误' });
+  }
+});
+
+/**
+ * POST /api/preview/images
+ * Converts document to images for preview (for weak devices / old browsers).
+ * Body: { filename: "xxx.docx" }
+ * Returns: { success, images: [{ page, url }], totalPages }
+ */
+router.post('/preview/images', authMiddleware, async (req, res) => {
+  try {
+    const { filename } = req.body;
+    if (!filename) return res.status(400).json({ error: 'filename is required' });
+
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+
+    const uploadsDir = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
+    const filePath = path.join(uploadsDir, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const result = convertToImages(filePath, filename);
+
+    if (!result.success) {
+      return res.status(500).json({ error: result.error || 'Image conversion failed' });
+    }
+
+    return res.json({
+      success: true,
+      images: result.images,
+      totalPages: result.totalPages,
+    });
+  } catch (err) {
+    console.error('Preview images error:', err);
+    res.status(500).json({ error: '图片转换服务错误' });
+  }
+});
 
 module.exports = router;
