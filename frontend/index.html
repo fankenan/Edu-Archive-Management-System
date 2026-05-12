@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>体卫艺科档案管理</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #F8FAFC; }
+  </style>
+<script>
+;(function(){
+  // Promise.withResolvers (ES2024)
+  if(!Promise.withResolvers){
+    Promise.withResolvers=function(){
+      var resolve,reject;
+      var promise=new Promise(function(res,rej){resolve=res;reject=rej});
+      return{promise:promise,resolve:resolve,reject:reject}
+    }
+  }
+  // URL.parse (Chrome 126+)
+  if(!URL.parse){
+    URL.parse=function(url,base){
+      try{return new URL(url,base)}catch(e){return null}
+    }
+  }
+  // Object.hasOwn (ES2022)
+  if(!Object.hasOwn){
+    Object.hasOwn=function(obj,prop){
+      return Object.prototype.hasOwnProperty.call(obj,prop)
+    }
+  }
+  // structuredClone (Chrome 98+)
+  if(typeof structuredClone==="undefined"){
+    window.structuredClone=function(obj){
+      if(obj instanceof Map)return new Map(obj);
+      if(obj instanceof Set)return new Set(obj);
+      if(obj instanceof Date)return new Date(obj);
+      if(obj instanceof RegExp)return new RegExp(obj);
+      return JSON.parse(JSON.stringify(obj))
+    }
+  }
+  // Uint8Array.prototype.toHex (Chrome 129+)
+  if(!Uint8Array.prototype.toHex){
+    Uint8Array.prototype.toHex=function(){
+      return Array.prototype.map.call(this,function(b){
+        return ("0"+b.toString(16)).slice(-2)
+      }).join("")
+    }
+  }
+  // Uint8Array.prototype.toBase64 (Chrome 129+)
+  if(!Uint8Array.prototype.toBase64){
+    Uint8Array.prototype.toBase64=function(){
+      var chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      var result=[];
+      var bytes=this;
+      for(var i=0;i<bytes.length;i+=3){
+        var b1=bytes[i],b2=bytes[i+1],b3=bytes[i+2];
+        result.push(chars[b1>>2]);
+        result.push(chars[((b1&3)<<4)|(b2>>4)]);
+        result.push(i+1<bytes.length?chars[((b2&15)<<2)|(b3>>6)]:"=");
+        result.push(i+2<bytes.length?chars[b3&63]:"=");
+      }
+      return result.join("")
+    }
+  }
+})();</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
