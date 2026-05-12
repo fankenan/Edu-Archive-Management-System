@@ -241,8 +241,10 @@ function cleanupTempFiles(uploadsDir, maxAgeMs = 24 * 60 * 60 * 1000) {
 }
 
 /**
- * Convert document to image(s) using LibreOffice.
- * Returns array of image info: { page: 1, path: "xxx_1.png", url: "/uploads/xxx_1.png" }
+ * Convert document to image(s) using two-step approach:
+ * 1. LibreOffice converts Office files to PDF
+ * 2. pdftoppm converts PDF to PNG images
+ * Returns { success, images: [{ page, path, url }], totalPages }
  */
 function convertToImages(sourcePath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
@@ -254,88 +256,61 @@ function convertToImages(sourcePath, originalName) {
   const baseName = path.basename(sourcePath).replace(/\.[^.]+$/, '');
   const dpi = parseInt(process.env.LIBREOFFICE_DPI || '150');
 
-  // Step 1: If not already PDF, convert to PDF first
-  let pdfPath = sourcePath;
-  if (ext !== '.pdf') {
-    if (!libreOfficeConvert(sourcePath, outDir)) {
-      return { success: false, error: 'LibreOffice conversion failed' };
-    }
-    const loPdfName = path.basename(originalName, ext) + '.pdf';
-    const loPdfPath = path.join(outDir, loPdfName);
-    if (!fs.existsSync(loPdfPath)) {
-      return { success: false, error: 'LibreOffice did not produce PDF' };
-    }
-    // Rename to unique name with .converted.pdf suffix
-    const convertedPdfName = baseName + '.converted.pdf';
-    pdfPath = path.join(outDir, convertedPdfName);
-    if (loPdfPath !== pdfPath) {
-      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-      fs.renameSync(loPdfPath, pdfPath);
-    }
-  } else {
-    // For existing PDF, create a copy with .converted.pdf name for page extraction
-    const convertedPdfName = baseName + '.converted.pdf';
-    pdfPath = path.join(outDir, convertedPdfName);
-    if (pdfPath !== sourcePath) {
-      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-      fs.copyFileSync(sourcePath, pdfPath);
-    }
-  }
-
-  // Step 2: Convert PDF to images using Ghostscript
-  // Ghostscript can rasterize PDF pages to PNG
-  const gsDpi = dpi;
-  const images = [];
+  let pdfPath = null;
 
   try {
-    // First get page count using a quick query
-    const pageCountCmd = `"${gsBin}" -dNOPAUSE -dBATCH -sDEVICE=nullpage "${pdfPath}" 2>&1 | grep -c "Page" || echo "1"`;
-    // Simpler: just try to convert and find how many files were created
+    // Step 1: Ensure we have a PDF
+    if (ext === '.pdf') {
+      pdfPath = sourcePath;
+    } else {
+      // Convert Office file to PDF using LibreOffice
+      if (!libreOfficeConvert(sourcePath, outDir)) {
+        return { success: false, error: 'LibreOffice conversion failed' };
+      }
+      const loPdfName = path.basename(originalName, ext) + '.pdf';
+      const loPdfPath = path.join(outDir, loPdfName);
+      if (!fs.existsSync(loPdfPath)) {
+        return { success: false, error: 'LibreOffice did not produce PDF' };
+      }
+      const convertedPdfName = baseName + '.image_temp.pdf';
+      pdfPath = path.join(outDir, convertedPdfName);
+      if (loPdfPath !== pdfPath) {
+        if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+        fs.renameSync(loPdfPath, pdfPath);
+      }
+    }
 
-    // Convert each page to PNG using Ghostscript
-    // Use pdftoppm (from poppler) if available, otherwise use Ghostscript
-    const tempPrefix = path.join(outDir, `${baseName}.converted`);
-
-    // Try using pdftoppm first (faster, better quality)
+    // Step 2: Convert PDF to PNG images using pdftoppm
+    const imgPrefix = path.join(outDir, baseName + '.image_temp');
     try {
-      execSync(`pdftoppm -r ${gsDpi} -png "${pdfPath}" "${tempPrefix}"`, {
+      execSync(`pdftoppm -r ${dpi} -png "${pdfPath}" "${imgPrefix}"`, {
         timeout: 60000,
         stdio: 'pipe',
       });
     } catch (e) {
-      // Fallback: use Ghostscript to convert PDF to images
-      try {
-        execSync(`"${gsBin}" -dNOPAUSE -dBATCH -sDEVICE=png16m -r${gsDpi} -sOutputFile="${tempPrefix}_%d.png" "${pdfPath}"`, {
-          timeout: 60000,
-          stdio: 'pipe',
-        });
-      } catch (gsErr) {
-        console.error('Image conversion failed:', gsErr.message);
-        // Cleanup and return error
-        try { fs.unlinkSync(pdfPath); } catch (_) {}
-        return { success: false, error: 'Image conversion failed' };
-      }
+      console.error('pdftoppm failed:', e.message);
+      if (pdfPath !== sourcePath) try { fs.unlinkSync(pdfPath); } catch (_) {}
+      return { success: false, error: 'PDF转图片失败，请确保poppler-utils已安装' };
     }
 
-    // Find generated images
+    // Step 3: Find and rename generated images
+    const pattern = baseName + '.image_temp';
     const files = fs.readdirSync(outDir)
-      .filter(f => f.startsWith(baseName + '.converted') && f.endsWith('.png'))
+      .filter(f => f.startsWith(pattern) && f.endsWith('.png'))
       .sort();
 
     if (files.length === 0) {
-      try { fs.unlinkSync(pdfPath); } catch (_) {}
+      if (pdfPath !== sourcePath) try { fs.unlinkSync(pdfPath); } catch (_) {}
       return { success: false, error: 'No images generated' };
     }
 
-    // Rename to proper naming convention
+    const images = [];
     for (let i = 0; i < files.length; i++) {
-      const oldPath = path.join(outDir, files[i]);
       const newName = `${baseName}.page_${i + 1}.png`;
       const newPath = path.join(outDir, newName);
-      if (oldPath !== newPath) {
-        if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
-        fs.renameSync(oldPath, newPath);
-      }
+      const oldPath = path.join(outDir, files[i]);
+      if (fs.existsSync(newPath)) fs.unlinkSync(newPath);
+      fs.renameSync(oldPath, newPath);
       images.push({
         page: i + 1,
         path: newName,
@@ -344,12 +319,12 @@ function convertToImages(sourcePath, originalName) {
     }
 
     // Cleanup the intermediate PDF
-    try { fs.unlinkSync(pdfPath); } catch (_) {}
+    if (pdfPath !== sourcePath) try { fs.unlinkSync(pdfPath); } catch (_) {}
 
     return { success: true, images, totalPages: images.length };
   } catch (e) {
     console.error('convertToImages error:', e.message);
-    try { if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath); } catch (_) {}
+    if (pdfPath && pdfPath !== sourcePath) try { fs.unlinkSync(pdfPath); } catch (_) {}
     return { success: false, error: e.message };
   }
 }
