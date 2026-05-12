@@ -301,7 +301,7 @@ export default function PdfPreview({ title, type, data, onClose }) {
         </div>
         <div className="pdf-section">
           <div className="pdf-section-title">一、来文信息</div>
-          <div className="pdf-body-text" style={{ textIndent: 0 }}>
+          <div className="pdf-body-text">
             来文单位：{data.send_unit}&emsp;收文日期：{data.receive_date}
           </div>
         </div>
@@ -313,17 +313,17 @@ export default function PdfPreview({ title, type, data, onClose }) {
           <div className="pdf-section">
             <div className="pdf-section-title">三、开展情况（共{data.linkedWorks.length}项）</div>
             {data.linkedWorks.map((w, i) => (
-              <div key={i} className="pdf-body-text" style={{ textIndent: 0, marginBottom: 4 }}>
+              <div key={i} className="pdf-body-text" style={{ marginBottom: 4 }}>
                 {i + 1}. {w.title} — {w.location}（{w.work_date}）参与人：{w.participants}
               </div>
             ))}
           </div>
         )}
-        {data.attachments?.length > 0 && (
+        {data.attachments?.filter(a => !isImageFile(a.name)).length > 0 && (
           <div className="pdf-section">
             <div className="pdf-section-title">附件</div>
-            {data.attachments.map((a, i) => (
-              <div key={i} className="pdf-body-text" style={{ textIndent: 0 }}>
+            {data.attachments.filter(a => !isImageFile(a.name)).map((a, i) => (
+              <div key={i} className="pdf-body-text">
                 {i + 1}. {a.name.replace(/\.[^.]+$/, '')}
               </div>
             ))}
@@ -331,13 +331,12 @@ export default function PdfPreview({ title, type, data, onClose }) {
         )}
       </div>
       {docImageAttachments.length > 0 && chunkArray(docImageAttachments, 2).map((group, gi) => (
-        <div key={`img-page-${gi}`} className="pdf-page" style={gi === 0 ? {} : {}}>
-          <div className="pdf-section-title" style={{ textAlign: 'center', marginBottom: 16 }}>附件图片（{gi * 2 + 1}{group.length > 1 ? '-' + (gi * 2 + 2) : ''}/{docImageAttachments.length}）</div>
+        <div key={`img-page-${gi}`} className="pdf-page pdf-photo-page">
+          <div className="pdf-section-title" style={{ textAlign: 'center', marginBottom: 12 }}>附件图片（{gi * 2 + 1}{group.length > 1 ? '-' + (gi * 2 + 2) : ''}/{docImageAttachments.length}）</div>
           <div className="pdf-photos">
             {group.map((a, i) => (
-              <div key={`img-${gi}-${i}`} className="pdf-photo-item" style={{ marginBottom: 16 }}>
-                <PhotoImg src={withToken(a.url)} alt={a.name} />
-                <div style={{ textAlign: 'center', fontSize: 16, color: '#000', marginTop: 4 }}>{a.name}</div>
+              <div key={`img-${gi}-${i}`} className="pdf-photo-item">
+                <img src={withToken(a.url)} alt={a.name} />
               </div>
             ))}
           </div>
@@ -367,19 +366,18 @@ export default function PdfPreview({ title, type, data, onClose }) {
         </div>
         {data.linked_doc && (
           <div className="pdf-section">
-            <div className="pdf-section-title">四、关联收文</div>
+            <div className="pdf-section-title">四、相关文件</div>
             <div className="pdf-body-text">{data.linked_doc.doc_no} — {data.linked_doc.title}</div>
           </div>
         )}
       </div>
       {data.photos?.length > 0 && chunkArray(data.photos, 2).map((group, gi) => (
-        <div key={`photo-page-${gi}`} className="pdf-page" style={gi === 0 ? {} : {}}>
-          <div className="pdf-section-title" style={{ textAlign: 'center', marginBottom: 16 }}>现场照片（{gi * 2 + 1}{group.length > 1 ? '-' + (gi * 2 + 2) : ''}/{data.photos.length}）</div>
+        <div key={`photo-page-${gi}`} className="pdf-page pdf-photo-page">
+          <div className="pdf-section-title" style={{ textAlign: 'center', marginBottom: 12 }}>现场照片（{gi * 2 + 1}{group.length > 1 ? '-' + (gi * 2 + 2) : ''}/{data.photos.length}）</div>
           <div className="pdf-photos">
             {group.map((p, i) => (
-              <div key={`photo-${gi}-${i}`} className="pdf-photo-item" style={{ marginBottom: 16 }}>
-                <PhotoImg src={withToken(p.url)} alt={p.name} />
-                <div style={{ textAlign: 'center', fontSize: 16, color: '#000', marginTop: 4 }}>{p.name}</div>
+              <div key={`photo-${gi}-${i}`} className="pdf-photo-item">
+                <img src={withToken(p.url)} alt={p.name} />
               </div>
             ))}
           </div>

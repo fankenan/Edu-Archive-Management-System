@@ -725,12 +725,43 @@ body {
 }
 .pdf-subtitle { font-size: 16pt; color: #000; text-align: center; margin-bottom: 16pt; }
 .pdf-section { margin-bottom: 14pt; }
-.pdf-section-title { font-size: 16pt; font-weight: bold; margin-bottom: 6pt; font-family: 'SimHei', '黑体', sans-serif; }
+.pdf-section-title { font-size: 16pt; font-weight: bold; margin-bottom: 6pt; font-family: 'SimHei', '黑体', sans-serif; text-indent: 2em; }
 .pdf-attachment-title { font-size: 16pt; font-weight: bold; margin-bottom: 10pt; font-family: 'SimHei', '黑体', sans-serif; text-align: center; padding-top: 10pt; }
 .pdf-body-text { font-size: 16pt; text-indent: 2em; margin-bottom: 8pt; font-family: 'FangSong', 'FangSong_GB2312', '仿宋', '仿宋_GB2312', serif; }
 .pdf-footer { display: flex; justify-content: space-between; margin-top: 24pt; font-size: 16pt; color: #000; }
-.pdf-photos { display: flex; flex-direction: column; gap: 12pt; margin-top: 12pt; }
-.pdf-photo-item { border: 1px solid #ddd; padding: 6pt; text-align: center; font-size: 10pt; color: #666; page-break-inside: avoid; break-inside: avoid; }
+.pdf-photos {
+  display: flex;
+  flex-direction: column;
+  gap: 12pt;
+  margin-top: 12pt;
+  height: calc(297mm - 37mm - 35mm - 60pt);
+  justify-content: space-around;
+}
+.pdf-photo-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ddd;
+  padding: 6pt;
+  text-align: center;
+  overflow: hidden;
+  page-break-inside: avoid;
+  break-inside: avoid;
+  min-height: 0;
+}
+.pdf-photo-item img {
+  max-width: 100%;
+  max-height: calc((297mm - 37mm - 35mm - 80pt) / 2);
+  object-fit: contain;
+  display: block;
+}
+.pdf-photo-page {
+  padding: 15mm 20mm;
+  display: flex;
+  flex-direction: column;
+}
 
 /* ===== FILE UPLOADER ===== */
 .upload-zone {
